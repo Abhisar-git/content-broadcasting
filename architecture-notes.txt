@@ -1,0 +1,94 @@
+Content Broadcasting System - Architecture Notes
+==============================================
+
+1) Authentication & RBAC Flow
+- JWT-based authentication protects all private routes.
+- Roles:
+  - principal: can review all content, approve/reject, and view analytics.
+  - teacher: can upload and view only their own content.
+- Auth middleware:
+  - authenticate: validates Bearer token, attaches user payload.
+  - authorizeRoles: enforces role-level permissions at route layer.
+
+2) Subject-based System Design
+- Subject values are normalized (lowercase, alphanumeric + hyphen).
+- Content is grouped by teacher + subject slot:
+  - content_slots table contains one slot per (teacher_id, subject).
+- Public endpoint is teacher-specific:
+  - GET /api/content/live/:teacherPublicId
+  - optional subject filter query supports subject-wise fetch.
+
+3) Upload Handling Approach
+- Multer (disk storage) handles uploads.
+- File validation:
+  - allowed types: JPG, PNG, GIF
+  - max size: configurable via MAX_UPLOAD_MB (default 10MB)
+- Required upload fields: title, subject, file
+- Optional fields: description, startTime, endTime, rotationDurationMinutes
+- Storage drivers:
+  - local (default)
+  - optional S3 (if STORAGE_DRIVER=s3 and AWS vars are set)
+
+4) Approval Workflow Design
+- Lifecycle:
+  uploaded -> pending -> approved/rejected
+- Teacher upload creates content + schedule, then marks as pending.
+- Principal routes:
+  - approve content
+  - reject content with mandatory reason
+- Only approved content is considered by live public APIs.
+
+5) Scheduling / Rotation Logic (Core)
+- Each teacher-subject slot rotates independently.
+- Each content in slot has:
+  - rotation_order
+  - duration_minutes
+- At request time:
+  - filter approved items
+  - filter items currently inside startTime-endTime
+  - compute cycle duration as sum(duration_minutes)
+  - use elapsed minutes from slot creation to choose active item
+  - loop continuously (modulo cycle duration)
+- If no eligible content exists: return "No content available".
+
+6) Database Design Decisions
+- users
+  id, name, email, password_hash, role, public_id, timestamps
+- contents
+  title, description, subject, file_path, file_type, file_size,
+  uploaded_by, status, rejection_reason, approved_by, approved_at,
+  start_time, end_time, timestamps
+- content_slots
+  teacher_id + subject unique pair
+- content_schedules
+  content_id, slot_id, rotation_order, duration_minutes
+- broadcast_logs (bonus analytics)
+  content_id, teacher_id, subject, served_at
+
+7) Folder Structure
+- src/controllers: API handlers
+- src/routes: route definitions
+- src/services: business logic
+- src/middlewares: auth, validation, rate limit, upload, error handlers
+- src/models: Sequelize models + associations
+- src/utils: constants and helpers
+- docs/openapi.yaml: API contract
+
+8) Middleware Usage
+- helmet, cors, morgan, json parser globally
+- auth + role middleware for private APIs
+- validate middleware (Zod schemas) for query/body/params
+- multer middleware for file parsing and validation
+- express-rate-limit for public /live endpoint
+- global not-found and error middleware
+
+9) Scalability Approach
+- Caching:
+  - Redis-based cache for live API when REDIS_URL is configured
+  - in-memory cache fallback for local execution
+- Design is service-oriented for easy extraction into modules/microservices.
+- broadcast_logs supports analytics and can be fed to data pipelines later.
+- Future scaling:
+  - add queue (BullMQ/RabbitMQ) for heavy media operations
+  - move upload and schedule processing to workers
+  - read replicas + indexes for high-volume live traffic
